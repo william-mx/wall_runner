@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
+from collections import deque
 import numpy as np
+import joblib
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Int16MultiArray
+from ament_index_python.packages import get_package_prefix
 
 
 class WallFollower(Node):
-    def __init__(self):
+    def __init__(self, model_path):
         super().__init__('uss_wall_follower')
 
-        # Mapping sensor indices to tf frames
         self.load_params()
 
-        # --- Class attributes ---
-        self.win_width = 20
-        self.sensors = ["USS_FC", "USS_FR", "USS_SRF", "USS_SRB"]
-
-        # Resolve sensor indices from name → numeric index
+        # Sensors and rolling window
+        self.sensors = ["USS_FL", "USS_FC", "USS_FR", "USS_SRF", "USS_SRB", "USS_SLB", "USS_SLF"]
+        self.win_width = 30
         self.sensor_indices = [self.frame2index[name] for name in self.sensors]
 
-        # Create empty queue: shape (win_width, num_sensors)
-        self.buffer = np.zeros((self.win_width, len(self.sensors)), dtype=np.float32)
-        self.buffer_ptr = 0  # circular write pointer
+        self.window = deque(maxlen=self.win_width)
+        for _ in range(self.win_width):
+            self.window.append(np.zeros(len(self.sensors), dtype=np.float32))
+
+        # Fixed driving speed
+        self.fixed_speed = 0.8
 
         # Publisher
         self.cmd_pub = self.create_publisher(AckermannDriveStamped, '/autonomous/ackermann_cmd', 10)
@@ -31,28 +35,42 @@ class WallFollower(Node):
         # Subscriber
         qos_profile = qos_profile_sensor_data
         qos_profile.depth = 1
-        self.create_subscription(Int16MultiArray, '/uss_sensors', self.callback, qos_profile)
+        self.create_subscription(Int16MultiArray, '/uss_sensors', self.uss_callback, qos_profile)
 
-        self.get_logger().info(f"WallFollower started. Tracking sensors: {self.sensors}")
+        self.model = joblib.load(model_path)
+        self.get_logger().info(f"Loaded model from: {model_path}")
 
-    def callback(self, msg):
-        distances = msg.data  # length 10 array of ints
+    def uss_callback(self, msg):
+        distances = np.asarray(msg.data, dtype=np.float32)
+        current = distances[self.sensor_indices]
 
-        # Extract selected sensors in the declared order
-        row = np.array([distances[i] for i in self.sensor_indices], dtype=np.float32)
+        # add to rolling window
+        self.window.append(current)
 
-        # Insert into circular buffer
-        self.buffer[self.buffer_ptr] = row
-        self.buffer_ptr = (self.buffer_ptr + 1) % self.win_width
+        # not enough data yet
+        if len(self.window) < self.win_width:
+            return
 
-        # For now, just log every few calls to verify it's working
-        if self.buffer_ptr == 0:
-            self.get_logger().info(f"Buffer updated:\n{self.buffer}")
+        # flatten window → model input
+        x = np.array(self.window, dtype=np.float32).reshape(1, -1)
 
-        # (Later) compute control here using buffer → pass to Ackermann msg
+        # predict steering
+        try:
+            pred_steer = float(self.model.predict(x)[0])
+        except Exception as e:
+            self.get_logger().warn(f"Prediction failed: {e}")
+            return
+
+        # publish command
+        cmd = AckermannDriveStamped()
+        cmd.header.stamp = self.get_clock().now().to_msg()
+        cmd.header.frame_id = "base_link"
+        cmd.drive.speed = self.fixed_speed
+        cmd.drive.steering_angle = pred_steer
+
+        self.cmd_pub.publish(cmd)
 
     def load_params(self):
-        # Declare parameters with default mapping
         self.declare_parameters(
             namespace='',
             parameters=[
@@ -68,18 +86,16 @@ class WallFollower(Node):
                 ('index2frame.9', 'USS_BR')
             ]
         )
-
-        # Build lookup tables
-        self.frame2index = {
-            self.get_parameter(f'index2frame.{i}').value: i
-            for i in range(10)
-        }
+        self.frame2index = {self.get_parameter(f'index2frame.{i}').value: i for i in range(10)}
         self.index2frame = {v: k for k, v in self.frame2index.items()}
 
 
 def main():
+    pkg_path = get_package_prefix('wall_runner').replace('install', 'src')
+    model_path = pkg_path + '/models/wall_follow_rf.pkl'
+
     rclpy.init()
-    node = WallFollower()
+    node = WallFollower(model_path)
     try:
         rclpy.spin(node)
     finally:
