@@ -10,6 +10,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Int16MultiArray
 from ament_index_python.packages import get_package_prefix
 
+from ros2_numpy import to_ackermann, multiarray_to_np
 
 class WallFollower(Node):
     def __init__(self, model_path):
@@ -29,23 +30,25 @@ class WallFollower(Node):
         # Fixed driving speed
         self.fixed_speed = 0.8
 
-        # Publisher
-        self.cmd_pub = self.create_publisher(AckermannDriveStamped, '/autonomous/ackermann_cmd', 10)
-
-        # Subscriber
+        # Define Quality of Service (QoS) for communication
         qos_profile = qos_profile_sensor_data
         qos_profile.depth = 1
+
+        # Publisher
+        self.cmd_pub = self.create_publisher(AckermannDriveStamped, '/autonomous/ackermann_cmd', qos_profile)
+
+        # Subscriber
         self.create_subscription(Int16MultiArray, '/uss_sensors', self.uss_callback, qos_profile)
 
         self.model = joblib.load(model_path)
         self.get_logger().info(f"Loaded model from: {model_path}")
 
     def uss_callback(self, msg):
-        distances = np.asarray(msg.data, dtype=np.float32)
-        current = distances[self.sensor_indices]
+        distances, timestamp_unix = multiarray_to_np(msg)
+        signals = distances[self.sensor_indices]
 
         # add to rolling window
-        self.window.append(current)
+        self.window.append(signals)
 
         # not enough data yet
         if len(self.window) < self.win_width:
@@ -56,17 +59,13 @@ class WallFollower(Node):
 
         # predict steering
         try:
-            pred_steer = float(self.model.predict(x)[0])
+            steering_angle = float(self.model.predict(x)[0])
         except Exception as e:
             self.get_logger().warn(f"Prediction failed: {e}")
             return
 
-        # publish command
-        cmd = AckermannDriveStamped()
-        cmd.header.stamp = self.get_clock().now().to_msg()
-        cmd.header.frame_id = "base_link"
-        cmd.drive.speed = self.fixed_speed
-        cmd.drive.steering_angle = pred_steer
+        # Create an Ackermann drive message with speed and steering angle
+        cmd = to_ackermann(self.fixed_speed, steering_angle, timestamp_unix)
 
         self.cmd_pub.publish(cmd)
 
