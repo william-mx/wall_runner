@@ -1,4 +1,3 @@
-Here is a shorter version:
 # MXcarkit Ultrasonic Wall-Following
 
 This project originated from a workshop at **Széchenyi István University** (Győr), led by **Ernő Horváth** and **Rudolf Krecht**. The workshop focused on following an **F1tenth-style racetrack** using robots equipped with **LiDAR** and **stereo cameras**, along with a working LiDAR-based wall-following controller.
@@ -35,7 +34,6 @@ We performed a grid search varying **which ultrasonic sensors are used** and **h
 * Using **more ultrasonic sensors** leads to more stable and accurate steering predictions.
 * **Longer sequence windows** further improve performance, because they allow the model to recognize track segments (straight vs. curve) rather than reacting only to instantaneous distances.
 
-Here is the revised *Model Evaluation* chapter, now using your **real** hardware specs:
 
 ---
 
